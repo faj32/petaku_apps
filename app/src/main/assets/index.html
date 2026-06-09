@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PSO Loop Map</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.css" />
+    <style>
+        body { margin: 0; padding: 0; }
+        #map { height: 100vh; width: 100vw; }
+        .leaflet-routing-container { display: none !important; }
+
+        #info {
+            position: absolute;
+            bottom: 88px; left: 10px;
+            z-index: 1000;
+            background: rgba(255,255,255,0.93);
+            padding: 8px 12px;
+            border-radius: 8px;
+            border-left: 4px solid #4CAF50;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+            font-family: sans-serif; font-size: 12px;
+            max-width: 72%; color: #333;
+            pointer-events: none;
+        }
+
+        /* Tombol re-center (muncul saat user geser peta) */
+        #btn-recenter {
+            position: absolute;
+            bottom: 160px; right: 12px;
+            z-index: 1002;
+            width: 44px; height: 44px;
+            background: white;
+            border-radius: 50%;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+            font-size: 22px;
+            display: none;
+            align-items: center; justify-content: center;
+            cursor: pointer;
+        }
+        #btn-recenter.show { display: flex; }
+
+        #nav-banner {
+            position: absolute;
+            bottom: 0; left: 0; right: 0;
+            z-index: 1001;
+            background: #1B5E20;
+            color: white;
+            display: none;
+            align-items: center;
+            padding: 12px 16px;
+            box-shadow: 0 -3px 12px rgba(0,0,0,0.25);
+            font-family: sans-serif;
+            min-height: 68px;
+        }
+        #nav-banner.show { display: flex; }
+
+        #nav-icon-box {
+            width: 48px; height: 48px;
+            background: #4CAF50;
+            border-radius: 10px;
+            display: flex; align-items: center; justify-content: center;
+            flex-shrink: 0; margin-right: 12px;
+            font-size: 26px;
+        }
+        #nav-instruksi { font-size: 15px; font-weight: bold; line-height: 1.2; }
+        #nav-jarak     { font-size: 12px; color: #A5D6A7; margin-top: 2px; }
+
+        .gps-dot {
+            display: inline-block; width: 8px; height: 8px;
+            background: #4CAF50; border-radius: 50%;
+            margin-right: 4px; vertical-align: middle;
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0%   { opacity:1; transform:scale(1); }
+            50%  { opacity:0.3; transform:scale(1.5); }
+            100% { opacity:1; transform:scale(1); }
+        }
+        .user-dot {
+            width: 20px; height: 20px;
+            background: #4CAF50;
+            border: 3px solid white;
+            border-radius: 50%;
+            box-shadow: 0 0 0 0 rgba(76,175,80,0.5);
+            animation: udot 2s infinite;
+        }
+        @keyframes udot {
+            0%   { box-shadow: 0 0 0 0   rgba(76,175,80,0.5); }
+            70%  { box-shadow: 0 0 0 12px rgba(76,175,80,0); }
+            100% { box-shadow: 0 0 0 0   rgba(76,175,80,0); }
+        }
+    </style>
+</head>
+<body>
+<div id="info">Menunggu GPS dari perangkat...</div>
+<div id="map"></div>
+<div id="btn-recenter">📍</div>
+
+<div id="nav-banner">
+    <div id="nav-icon-box"><span id="nav-icon">⬆️</span></div>
+    <div>
+        <div id="nav-instruksi">Memulai navigasi</div>
+        <div id="nav-jarak"></div>
+    </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
+<script>
+    var map = L.map('map', { zoomControl: true }).setView([-0.0263, 109.3425], 17);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap'
+    }).addTo(map);
+
+    var koordinatSaya       = null;
+    var markerUser          = null;
+    var tujuanTersimpan     = [];
+    var sedangProses        = false;
+    var garisRuteBelumLewat = null;
+    var garisRuteSudahLewat = null;
+    var semuaLatLngRute     = [];
+    var indexPosisiDiRute   = 0;
+    var daftarInstruksi     = [];
+    var indexInstruksiSaat  = 0;
+    var JARAK_OFF_ROUTE     = 80;
+    var JARAK_PERINGATAN    = 40;
+
+    // ── Kamera ikut user ──
+    var autoFollow    = true;
+    var followTimeout = null;
+
+    var btnRecenter = document.getElementById('btn-recenter');
+    btnRecenter.addEventListener('click', function() {
+        autoFollow = true;
+        btnRecenter.classList.remove('show');
+        if (koordinatSaya) {
+            map.setView(koordinatSaya, 17, { animate: true });
+        }
+    });
+
+    map.on('dragstart', function() {
+        autoFollow = false;
+        btnRecenter.classList.add('show');
+        clearTimeout(followTimeout);
+        // Auto-follow kembali aktif 10 detik setelah user berhenti geser
+        followTimeout = setTimeout(function() {
+            autoFollow = true;
+            btnRecenter.classList.remove('show');
+            if (koordinatSaya) {
+                map.setView(koordinatSaya, map.getZoom(), { animate: true });
+            }
+        }, 10000);
+    });
+
+    function updateGPSdariKotlin(lat, lon, akurasi) {
+        koordinatSaya = L.latLng(lat, lon);
+
+        if (!markerUser) {
+            // Pertama kali: buat marker hijau berdenyut
+            var iconUser = L.divIcon({
+                html: '<div class="user-dot"></div>',
+                className: '', iconSize: [20, 20], iconAnchor: [10, 10]
+            });
+            markerUser = L.marker(koordinatSaya, {
+                icon: iconUser, zIndexOffset: 1000
+            }).addTo(map);
+
+            // Fokus ke posisi user zoom level jalan
+            map.setView(koordinatSaya, 17);
+            setInfo('<span class="gps-dot"></span><b>GPS Aktif</b> · ' +
+                    Math.round(akurasi) + 'm · Masukkan tujuan');
+        } else {
+            markerUser.setLatLng(koordinatSaya);
+
+            if (autoFollow) {
+                map.setView(koordinatSaya, map.getZoom(), {
+                    animate: true,
+                    duration: 0.8   // smooth transition
+                });
+            }
+        }
+
+        // Navigasi aktif
+        if (tujuanTersimpan.length > 0 && !sedangProses) {
+            var jarakDariJalur = hitungJarakDariRute(koordinatSaya);
+            if (jarakDariJalur > JARAK_OFF_ROUTE) {
+                setInfo('🔄 <b>Off-route!</b> Menghitung ulang...');
+                sembunyikanBanner();
+                kirimKePSO(tujuanTersimpan, true);
+            } else {
+                updateGarisSudahLewat(koordinatSaya);
+                updateBannerNavigasi(koordinatSaya);
+            }
+        }
+    }
+
+
+    var gpsKotlinAktif = false;
+    var _asliUpdate = updateGPSdariKotlin;
+    updateGPSdariKotlin = function(lat, lon, akurasi) {
+        gpsKotlinAktif = true;
+        _asliUpdate(lat, lon, akurasi);
+    };
+
+    setTimeout(function() {
+        if (!gpsKotlinAktif && navigator.geolocation) {
+            navigator.geolocation.watchPosition(
+                function(pos) {
+                    updateGPSdariKotlin(
+                        pos.coords.latitude,
+                        pos.coords.longitude,
+                        pos.coords.accuracy
+                    );
+                },
+                function(err) { setInfo('GPS error: ' + err.code); },
+                { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }
+            );
+        }
+    }, 2000);
+
+
+    function kirimKePSO(waypointsTujuan, autoReroute) {
+        if (!koordinatSaya || sedangProses) return;
+        sedangProses = true;
+
+        var semuaLokasi = [[koordinatSaya.lat, koordinatSaya.lng]];
+        waypointsTujuan.forEach(function(wp) { semuaLokasi.push([wp.lat, wp.lng]); });
+
+// PENGHUBUNG KE SERVER PYTHON PRIBADI
+        fetch('https://mrf21.pythonanywhere.com/pso', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ locations: semuaLokasi, speed_kmh: 45 })
+        })
+        .then(function(r) { return r.json(); })
+        .then(function(resData) {
+            sedangProses = false;
+            if (!resData.route) { setInfo('Error: ' + (resData.error || 'Gagal.')); return; }
+
+            var idx    = resData.route;
+            var start  = idx.indexOf(0);
+            var sorted = idx.slice(start).concat(idx.slice(0, start));
+            sorted.push(0);
+
+            var allWp = [koordinatSaya].concat(waypointsTujuan);
+            var optWp = sorted.map(function(i) { return allWp[i]; });
+
+            bersihkanGaris();
+            semuaLatLngRute    = [];
+            daftarInstruksi    = [];
+            indexPosisiDiRute  = 0;
+            indexInstruksiSaat = 0;
+
+            var ctrl = L.Routing.control({
+                waypoints: optWp,
+                routeWhileDragging: false,
+                addWaypoints: false,
+                show: false, collapsible: false,
+                createMarker: function() { return null; },
+                lineOptions: { styles: [{ color: '#E53935', weight: 5, opacity: 0.9 }] }
+            }).addTo(map);
+
+            ctrl.on('routesfound', function(e) {
+                var route = e.routes[0];
+                semuaLatLngRute = route.coordinates.map(function(c) {
+                    return L.latLng(c.lat, c.lng);
+                });
+
+                daftarInstruksi = [];
+                if (route.instructions) {
+                    route.instructions.forEach(function(ins) {
+                        var p  = parseInstruksi(ins.type, ins.road);
+                        var ll = semuaLatLngRute[ins.index || 0] ||
+                                 semuaLatLngRute[semuaLatLngRute.length - 1];
+                        daftarInstruksi.push({
+                            latLng: ll, icon: p.icon,
+                            teks: p.teks, jarak: ins.distance || 0
+                        });
+                    });
+                }
+
+                bersihkanGaris();
+                garisRuteBelumLewat = L.polyline(semuaLatLngRute, {
+                    color: '#E53935', weight: 5, opacity: 0.9
+                }).addTo(map);
+
+                map.removeControl(ctrl);
+                if (daftarInstruksi.length > 0) tampilkanBanner(daftarInstruksi[0]);
+
+                var mnt  = resData.time_minutes;
+                var jam  = Math.floor(mnt / 60);
+                var sisa = Math.round(mnt % 60);
+                var wStr = jam > 0 ? jam + 'j ' + sisa + 'mnt' : sisa + ' menit';
+                var pfx  = autoReroute ? '🔄 Reroute' : '✅ Rute siap';
+                setInfo('<span class="gps-dot"></span>' + pfx +
+                        ' · ' + resData.distance_km + ' km · ' + wStr);
+
+                // Aktifkan kembali auto-follow setelah rute tampil
+                autoFollow = true;
+                btnRecenter.classList.remove('show');
+            });
+        })
+        .catch(function(err) {
+            sedangProses = false;
+            setInfo('Gagal ke server. Cek koneksi.');
+            console.error(err);
+        });
+    }
+
+    function updateBannerNavigasi(posUser) {
+        if (daftarInstruksi.length === 0) return;
+
+        while (indexInstruksiSaat < daftarInstruksi.length - 1) {
+            if (posUser.distanceTo(daftarInstruksi[indexInstruksiSaat].latLng) < 20)
+                indexInstruksiSaat++;
+            else break;
+        }
+
+        var ins = daftarInstruksi[indexInstruksiSaat];
+        if (!ins) { sembunyikanBanner(); return; }
+
+        var jarak = posUser.distanceTo(ins.latLng);
+        tampilkanBanner(ins, jarak);
+        document.getElementById('nav-banner').style.background =
+            jarak < JARAK_PERINGATAN ? '#E65100' : '#1B5E20';
+    }
+
+    function tampilkanBanner(ins, jarakOverride) {
+        var jarak = (jarakOverride !== undefined) ? jarakOverride : ins.jarak;
+        document.getElementById('nav-icon').textContent      = ins.icon;
+        document.getElementById('nav-instruksi').textContent = ins.teks;
+        document.getElementById('nav-jarak').textContent     =
+            jarak > 0 ? 'dalam ' + formatJarak(jarak) : '';
+        document.getElementById('nav-banner').classList.add('show');
+    }
+
+    function sembunyikanBanner() {
+        document.getElementById('nav-banner').classList.remove('show');
+    }
+
+    // Ketika Sudah Dilewati
+    function updateGarisSudahLewat(posUser) {
+        if (semuaLatLngRute.length === 0) return;
+        var minJarak = Infinity, minIdx = indexPosisiDiRute;
+        var sampai = Math.min(semuaLatLngRute.length, indexPosisiDiRute + 200);
+
+        for (var i = indexPosisiDiRute; i < sampai; i++) {
+            var d = posUser.distanceTo(semuaLatLngRute[i]);
+            if (d < minJarak) { minJarak = d; minIdx = i; }
+        }
+        if (minIdx <= indexPosisiDiRute) return;
+        indexPosisiDiRute = minIdx;
+
+        var sudah = semuaLatLngRute.slice(0, minIdx + 1);
+        var belum = semuaLatLngRute.slice(minIdx);
+        bersihkanGaris();
+
+        if (sudah.length > 1)
+            garisRuteSudahLewat = L.polyline(sudah,
+                { color: '#BDBDBD', weight: 5, opacity: 0.45, dashArray: '6,6' }).addTo(map);
+        if (belum.length > 1)
+            garisRuteBelumLewat = L.polyline(belum,
+                { color: '#E53935', weight: 5, opacity: 0.9 }).addTo(map);
+    }
+
+    function hitungJarakDariRute(posUser) {
+        if (semuaLatLngRute.length === 0) return 0;
+        var min  = Infinity;
+        var dari = Math.max(0, indexPosisiDiRute - 5);
+        var ke   = Math.min(semuaLatLngRute.length, indexPosisiDiRute + 100);
+        for (var i = dari; i < ke; i++) {
+            var d = posUser.distanceTo(semuaLatLngRute[i]);
+            if (d < min) min = d;
+        }
+        return min;
+    }
+
+    function bersihkanGaris() {
+        if (garisRuteBelumLewat) { map.removeLayer(garisRuteBelumLewat); garisRuteBelumLewat = null; }
+        if (garisRuteSudahLewat) { map.removeLayer(garisRuteSudahLewat); garisRuteSudahLewat = null; }
+    }
+
+    function setInfo(html) { document.getElementById('info').innerHTML = html; }
+    function formatJarak(m) { return m >= 1000 ? (m/1000).toFixed(1)+' km' : Math.round(m)+' m'; }
+
+    function parseInstruksi(type, road) {
+        var j = road ? ' ke ' + road : '';
+        var tbl = {
+            'Straight':           { icon:'⬆️', teks:'Lurus'+j },
+            'SlightRight':        { icon:'↗️', teks:'Belok kanan sedikit'+j },
+            'Right':              { icon:'➡️', teks:'Belok kanan'+j },
+            'SharpRight':         { icon:'↪️', teks:'Belok kanan tajam'+j },
+            'TurnAround':         { icon:'🔄', teks:'Putar balik' },
+            'SharpLeft':          { icon:'↩️', teks:'Belok kiri tajam'+j },
+            'Left':               { icon:'⬅️', teks:'Belok kiri'+j },
+            'SlightLeft':         { icon:'↖️', teks:'Belok kiri sedikit'+j },
+            'WaypointReached':    { icon:'📍', teks:'Tiba di tujuan antara' },
+            'Roundabout':         { icon:'🔃', teks:'Masuk bundaran'+j },
+            'DestinationReached': { icon:'🏁', teks:'Anda sudah sampai!' },
+            'Head':               { icon:'⬆️', teks:'Mulai perjalanan'+j },
+        };
+        return tbl[type] || { icon:'⬆️', teks: type + j };
+    }
+
+    function hitungRuteMutar(inputString) {
+        if (!koordinatSaya) { setInfo('❗ GPS belum terkunci. Tunggu...'); return; }
+        setInfo('🔍 Mencari koordinat tujuan...');
+        sembunyikanBanner();
+
+        var daftar    = inputString.split(',').map(function(s) { return s.trim(); });
+        var waypoints = [], gagal = [];
+
+        var promises = daftar.map(function(alamat) {
+            return fetch('https://nominatim.openstreetmap.org/search?format=json&q=' +
+                encodeURIComponent(alamat) + '&limit=1&email=psoapps.tes@gmail.com')
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                if (data.length > 0)
+                    waypoints.push(L.latLng(parseFloat(data[0].lat), parseFloat(data[0].lon)));
+                else
+                    gagal.push(alamat);
+            });
+        });
+
+        Promise.all(promises).then(function() {
+            if (waypoints.length < 1) { setInfo('❗ Alamat tidak ditemukan.'); return; }
+            tujuanTersimpan = waypoints;
+            kirimKePSO(tujuanTersimpan, false);
+        }).catch(function() { setInfo('Gangguan koneksi.'); });
+    }
+</script>
+</body>
+</html>
