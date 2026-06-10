@@ -45,6 +45,7 @@ Oleh : Fajriansyah Pangestu (D1041211065)
 14. Sambungkan hp android anda dengan laptop dengan usb
 
 15. Jika di android studio nya hp android anda sudah terdeteksi maka lakukan RUN
+    
 <img width="933" height="75" alt="image" src="https://github.com/user-attachments/assets/ef1ccd34-4f95-486b-83d8-c2e59c45fb18" />
 
-16. Setelah berhasil aplikasi sudah siap digunakan.
+17. Setelah berhasil aplikasi sudah siap digunakan.
